@@ -1,0 +1,226 @@
+{
+  "name": "loom_parser_demo",
+  "version": "1.0",
+  "description": "Demonstrates all parser features: step types, connections, parameters, env-var substitution, and nested configs.",
+
+  "start_at": "paginated_search",
+  "error_handling": {
+    "retry": {
+      "max_attempts": 3,
+      "backoff": "exponential",
+      "base_ms": 1000
+    }
+  },
+
+  "connections": {
+    "jira_api": {
+      "type": "http",
+      "base_url": "https://company.atlassian.net/rest/api/3",
+      "rate_limit": { "max": 10, "window_sec": 1.0 },
+      "max_inflight": 10,
+      "backpressure": { "max_buffered_responses": 100, "resume_at": 50 },
+      "auth": { "type": "bearer", "token_from": "${JIRA_TOKEN}" },
+      "timeout_ms": 30000,
+      "fail_on_status": [429, 500, 502, 503]
+    },
+
+    "github_api": {
+      "type": "http",
+      "base_url": "https://api.github.com",
+      "rate_limit": { "max": 30, "window_sec": 60.0 },
+      "max_inflight": 5,
+      "auth": { "type": "bearer", "token_from": "${GITHUB_TOKEN:-env:GITHUB_TOKEN}" },
+      "fail_on_status": [403, 429, 500]
+    },
+
+    "minio_store": {
+      "type": "s3",
+      "endpoint": "${MINIO_ENDPOINT:-http://localhost:9000}",
+      "bucket": "${MINIO_BUCKET:-loom-output}",
+      "access_key": "${MINIO_ACCESS_KEY:-minioadmin}",
+      "secret_key": "${MINIO_SECRET_KEY:-minioadmin}",
+      "prefix": "parsed_output"
+    },
+
+    "archive": {
+      "type": "s3",
+      "endpoint": "${MINIO_ENDPOINT:-http://localhost:9000}",
+      "bucket": "loom-archive",
+      "access_key": "${MINIO_ACCESS_KEY:-minioadmin}",
+      "secret_key": "${MINIO_SECRET_KEY:-minioadmin}",
+      "prefix": "raw_json_archive"
+    },
+
+    "bigquery_warehouse": {
+      "type": "stub",
+      "reason": "BigQuery Sink connector not yet implemented"
+    },
+
+    "slack_webhook": {
+      "type": "stub",
+      "reason": "Slack outbound connector not yet implemented"
+    }
+  },
+
+  "steps": [
+    {
+      "id": "paginated_search",
+      "type": "generate",
+      "description": "Paginate Jira search API: iterate startAt from 0..900 step 100",
+      "connection": "jira_api",
+      "parallel": 2,
+      "parameters": [
+        {
+          "name": "start_at",
+          "source": "Range",
+          "range_start": 0,
+          "range_end": 1000,
+          "range_step": 100
+        },
+        {
+          "name": "project",
+          "source": "Literal",
+          "value": "ENG"
+        }
+      ],
+      "template": {
+        "method": "GET",
+        "path_template": "/search?jql=project={project}+AND+status!=Closed&startAt={start_at}&maxResults=100",
+        "headers": {
+          "Accept": "application/json",
+          "X-Request-Tag": "loom-parser-demo"
+        }
+      },
+      "request_queue": {
+        "durable": true,
+        "storage": "sqlite://var/loom/request_queue.db",
+        "max_pending": 5000,
+        "flush_policy": {
+          "trigger": "batch_complete",
+          "archive_connection": "archive",
+          "archive_format": "json.gz",
+          "retention_days": 30,
+          "keep_failed": true
+        }
+      }
+    },
+
+    {
+      "id": "parse_fields",
+      "type": "transform",
+      "description": "Python transform: extract {key, summary, status, assignee, created, resolution} from raw Jira JSON",
+      "input": { "from_step": "paginated_search", "field": "issues" },
+      "parallel": 4,
+      "function": {
+        "language": "python",
+        "entrypoint": "pipelines/transforms/jira_parser.py:extract_fields"
+      }
+    },
+
+    {
+      "id": "filter_completed",
+      "type": "filter",
+      "description": "Keep only issues that are Resolved or Closed",
+      "input": { "from_step": "parse_fields" },
+      "parallel": 2,
+      "conditions": [
+        { "field": "status", "op": "ne", "value": "Open" },
+        { "field": "status", "op": "ne", "value": "In Progress" },
+        { "field": "resolution_date", "op": "not_null" }
+      ]
+    },
+
+    {
+      "id": "fetch_github_issues",
+      "type": "generate",
+      "description": "For each ticket key, fetch linked GitHub issue details",
+      "connection": "github_api",
+      "input": { "from_step": "filter_completed" },
+      "parameters": [
+        {
+          "name": "key",
+          "source": "Column",
+          "from_step": "filter_completed",
+          "field": "key"
+        }
+      ],
+      "template": {
+        "method": "GET",
+        "path_template": "/search/issues?q=repo:company/eng+{key}+in:title",
+        "headers": { "Accept": "application/vnd.github.v3+json" }
+      },
+      "request_queue": {
+        "durable": true,
+        "storage": "sqlite://var/loom/github_queue.db",
+        "max_pending": 5000
+      }
+    },
+
+    {
+      "id": "explode_github_items",
+      "type": "unnest",
+      "description": "Explode the GitHub search response items list into one row per item",
+      "input": { "from_step": "fetch_github_issues", "field": "items" },
+      "unnest": {
+        "field": "items",
+        "array_column": "gh_issue",
+        "drop_null": true
+      }
+    },
+
+    {
+      "id": "join_jira_github",
+      "type": "join",
+      "description": "Inner-join Jira tickets with GitHub issues on ticket key",
+      "input": { "inputs": ["filter_completed", "explode_github_items"] },
+      "join_config": {
+        "key": "key",
+        "join": "inner",
+        "timeout": "30s",
+        "on_timeout": "dead_letter"
+      }
+    },
+
+    {
+      "id": "compute_metrics",
+      "type": "aggregate",
+      "description": "Group by assignee, compute avg cycle time and issue counts",
+      "input": { "from_step": "join_jira_github" },
+      "parallel": 2,
+      "group_by": ["assignee", "status"],
+      "aggregates": [
+        { "name": "avg_cycle_days", "field": "cycle_time_days", "func": "avg" },
+        { "name": "p95_cycle_days", "field": "cycle_time_days", "func": "percentile", "arg": 95 },
+        { "name": "total_issues", "field": "key", "func": "count" },
+        { "name": "max_cycle_days", "field": "cycle_time_days", "func": "max" }
+      ]
+    },
+
+    {
+      "id": "write_parquet",
+      "type": "sink",
+      "description": "Write final metrics to daily-partitioned Parquet in MinIO",
+      "input": { "from_step": "compute_metrics" },
+      "connection": "minio_store",
+      "output": {
+        "path_template": "outputs/metrics/{date}.parquet",
+        "format": "parquet",
+        "partition": "daily"
+      }
+    },
+
+    {
+      "id": "bigquery_sink",
+      "type": "stub",
+      "description": "Future: push metrics to BigQuery reporting table",
+      "reason": "BigQuery output connector not yet available"
+    },
+
+    {
+      "id": "slack_notify",
+      "type": "stub",
+      "description": "Future: send pipeline completion summary to Slack",
+      "reason": "Slack webhook connector not yet available"
+    }
+  ]
+}

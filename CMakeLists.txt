@@ -92,6 +92,22 @@ target_compile_definitions(loom_engine PUBLIC
 add_executable(loom src/main.cpp)
 target_link_libraries(loom PRIVATE loom_engine)
 
+# ── Tests ────────────────────────────────────────────────────────────────
+if(LOOM_BUILD_TESTS)
+    file(GLOB TEST_SOURCES tests/*.cpp)
+    foreach(TEST_FILE ${TEST_SOURCES})
+        get_filename_component(TEST_NAME ${TEST_FILE} NAME_WE)
+        add_executable(${TEST_NAME} ${TEST_FILE})
+        target_include_directories(${TEST_NAME} PRIVATE
+            include
+            tests
+            ${JSONCPP_INCLUDE_DIRS}
+        )
+        target_link_libraries(${TEST_NAME} PRIVATE loom_engine)
+        target_link_directories(${TEST_NAME} PRIVATE ${JSONCPP_LIBRARY_DIRS})
+    endforeach()
+endif()
+
 # ── Install ──────────────────────────────────────────────────────────────
 install(TARGETS loom DESTINATION bin)
 install(DIRECTORY include/loom DESTINATION include)
