@@ -1,0 +1,25 @@
+# Loom global engine configuration
+engine:
+  thread_pool_size: 0           # 0 = auto-detect hardware concurrency
+  log_level: info               # trace, debug, info, warn, error
+  metrics_port: 9090
+  grace_period_sec: 30          # max wait for inflight work on shutdown
+
+request_queue:
+  db_path: var/loom/request_queue.db
+  max_pending: 10000
+
+backpressure:
+  default_max_buffered: 1000    # high watermark per step
+  default_resume_at: 500        # low watermark per step
+
+retry:
+  max_attempts: 3
+  base_ms: 1000
+  backoff: exponential
+
+distributed:
+  coordinator_port: 5050
+  executor_port: 5051
+  heartbeat_interval_sec: 5
+  heartbeat_timeout_sec: 15

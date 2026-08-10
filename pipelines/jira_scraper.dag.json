@@ -1,0 +1,129 @@
+{
+  "name": "jira-cycle-time",
+  "version": "1.0",
+  "start_at": "generate_request_queue",
+  "error_handling": {
+    "retry": { "max_attempts": 3, "backoff": "exponential", "base_ms": 1000 }
+  },
+  "connections": {
+    "jira_api": {
+      "type": "http",
+      "base_url": "https://jira.corp.com/rest/api/2",
+      "rate_limit": { "max": 10, "window_sec": 1 },
+      "max_inflight": 10,
+      "backpressure": { "max_buffered_responses": 50, "resume_at": 25 },
+      "auth": { "type": "bearer", "token_from": "env:JIRA_TOKEN" },
+      "timeout_ms": 30000,
+      "fail_on_status": [429, 500, 502, 503]
+    },
+    "s3_landing": {
+      "type": "s3",
+      "endpoint": "${MINIO_ENDPOINT:-http://localhost:9000}",
+      "bucket": "loom-data",
+      "access_key": "${MINIO_ACCESS_KEY:-minioadmin}",
+      "secret_key": "${MINIO_SECRET_KEY:-minioadmin}",
+      "prefix": "jira-scraper"
+    },
+    "s3_archive": {
+      "type": "s3",
+      "endpoint": "${MINIO_ENDPOINT:-http://localhost:9000}",
+      "bucket": "loom-archive",
+      "access_key": "${MINIO_ACCESS_KEY:-minioadmin}",
+      "secret_key": "${MINIO_SECRET_KEY:-minioadmin}",
+      "prefix": "jira-raw-archive"
+    },
+    "redshift": { "type": "stub", "reason": "not yet implemented" },
+    "bigquery": { "type": "stub", "reason": "not yet implemented" },
+    "snowflake": { "type": "stub", "reason": "not yet implemented" }
+  },
+  "steps": [
+    {
+      "id": "generate_request_queue",
+      "type": "generate",
+      "connection": "jira_api",
+      "description": "Build the request queue: one HTTP GET per Jira ticket AA-1 through AA-100",
+      "input": {
+        "from_connection": "s3_landing",
+        "path": "inputs/tickets_to_scrape.json"
+      },
+      "template": {
+        "method": "GET",
+        "path_template": "/issue/{ticket_id}",
+        "headers": {
+          "Accept": "application/json",
+          "X-Request-Tag": "loom-scraper-v1"
+        }
+      },
+      "request_queue": {
+        "durable": true,
+        "storage": "sqlite:///var/loom/request_queue.db",
+        "max_pending": 10000,
+        "flush_policy": {
+          "trigger": "batch_complete",
+          "archive_connection": "s3_archive",
+          "archive_format": "json.gz",
+          "retention_days": 14
+        }
+      }
+    },
+    {
+      "id": "parse_jira_response",
+      "type": "transform",
+      "description": "Extract fields from raw Jira JSON",
+      "input": { "from_step": "generate_request_queue" },
+      "parallel": 8,
+      "function": {
+        "language": "python",
+        "entrypoint": "pipelines/transforms/jira_parser.py:extract"
+      }
+    },
+    {
+      "id": "filter_resolved",
+      "type": "filter",
+      "description": "Keep only resolved tickets for cycle-time",
+      "input": { "from_step": "parse_jira_response" },
+      "parallel": 4,
+      "condition": [
+        { "field": "status", "op": "eq", "value": "Resolved" },
+        { "field": "resolution_date", "op": "not_null" }
+      ]
+    },
+    {
+      "id": "compute_cycle_time",
+      "type": "aggregate",
+      "description": "Group by assignee, compute avg cycle time",
+      "input": { "from_step": "filter_resolved" },
+      "parallel": 4,
+      "group_by": ["assignee"],
+      "aggregates": [
+        { "name": "avg_cycle_days", "field": "cycle_time_days", "func": "avg" },
+        { "name": "tickets_resolved", "field": "id", "func": "count" },
+        { "name": "p95_cycle_days", "field": "cycle_time_days", "func": "percentile", "arg": 95 }
+      ]
+    },
+    {
+      "id": "write_results",
+      "type": "sink",
+      "description": "Write cycle time report to S3/MinIO",
+      "input": { "from_step": "compute_cycle_time" },
+      "connection": "s3_landing",
+      "output": {
+        "path_template": "outputs/cycle_time/{date}.parquet",
+        "format": "parquet",
+        "partition": "daily"
+      }
+    },
+    {
+      "id": "write_slack_summary",
+      "type": "stub",
+      "reason": "not yet implemented",
+      "description": "Post summary to Slack webhook — connector pending"
+    },
+    {
+      "id": "write_snowflake",
+      "type": "stub",
+      "reason": "not yet implemented",
+      "description": "INSERT INTO snowflake reporting table — connector pending"
+    }
+  ]
+}

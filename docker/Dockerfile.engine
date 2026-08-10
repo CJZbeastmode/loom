@@ -1,0 +1,31 @@
+FROM ubuntu:24.04 AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake ninja-build git ca-certificates \
+    libsqlite3-dev libuv1-dev libspdlog-dev nlohmann-json3-dev \
+    libarrow-dev libparquet-dev libgrpc++-dev protobuf-compiler-grpc \
+    python3-dev pybind11-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+RUN cmake -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DLOOM_BUILD_TESTS=OFF \
+    && cmake --build build -j$(nproc)
+
+FROM ubuntu:24.04 AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsqlite3-0 libuv1t64 libarrow1500 libparquet1500 libgrpc++1.51 \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /src/build/loom /usr/local/bin/loom
+COPY --from=builder /src/config.yaml /etc/loom/config.yaml
+
+RUN mkdir -p /var/loom
+
+ENTRYPOINT ["loom"]
+CMD ["--help"]

@@ -1,0 +1,70 @@
+version: "3.9"
+
+services:
+  minio:
+    image: minio/minio:latest
+    hostname: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/loom-data &&
+      mc mb --ignore-existing local/loom-archive &&
+      echo 'MinIO buckets ready'
+      "
+
+  engine:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.engine
+    hostname: loom-engine
+    volumes:
+      - ../pipelines:/workspace/pipelines
+      - ../config.yaml:/etc/loom/config.yaml
+      - loom_var:/var/loom
+    environment:
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    working_dir: /workspace
+    command: --help
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    hostname: loom-worker
+    volumes:
+      - loom_var:/var/loom
+    environment:
+      LOOM_COORDINATOR_HOST: loom-engine
+      LOOM_COORDINATOR_PORT: "5050"
+    command: --help
+    profiles:
+      - distributed
+
+volumes:
+  minio_data:
+  loom_var:

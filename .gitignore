@@ -1,0 +1,39 @@
+# Build output
+build/
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.exe
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# CMake generated
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# Compiled artifacts (safety net for non-build-dir builds)
+/loom
+
+# SQLite databases
+*.db
+*.sqlite
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Archive / output (pipeline outputs)
+outputs/
+var/
