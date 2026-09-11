@@ -60,6 +60,7 @@ moment it arrives — request #100 may still be in flight.
 | 1 | [Sprint 1 — DAG Parser](sprint1-parser.md) | JSON → typed DAG structs, env-var substitution, 8 step types, both connection formats | Implemented |
 | 2 | [Sprint 2 — Durable Request Queue & Rate Limiter](sprint2-queue-rate-limiter.md) | SQLite-backed persistent queue (crash-resume) + lock-free token bucket | Implemented |
 | 3 | [Sprint 3 — Async HTTP Client & Source Scheduler](sprint3-http-scheduler.md) | libuv async HTTP client, streaming source scheduler, bounded backpressure queue | Implemented |
+| 4 | [Sprint 4 — Work-Stealing Thread Pool & Parallel Compute](sprint4-compute.md) | work-stealing pool + columnar transform/filter, benchmarked parallel speedup | Implemented |
 
 ---
 
@@ -89,6 +90,9 @@ Test suites and expected counts:
 | `test_http_client` | async HTTP: GET, concurrency, timeout, invalid URL, fail_on_status | 6 |
 | `test_source_scheduler` | end-to-end streaming, max-inflight cap, backpressure, failures | 4 |
 | `test_dag_executor` | executor lifecycle | 3 |
+| `test_thread_pool` | work-stealing pool: correctness, speedup, nested submit | 5 |
+| `test_filter` | columnar filter: all ops, AND, nulls, parallel, benchmark | 11 |
+| `test_transform` | registry, apply, parallel apply, row-count guard | 4 |
 
 > **Note on the test framework:** tests use a tiny self-contained harness
 > (`tests/test_utils.h`), not Google Test. This was a deliberate choice so the
@@ -108,3 +112,5 @@ Test suites and expected counts:
 | How do 3 threads share the pipeline safely? | Sprint 3, "The threading model" |
 | What actually causes `uv_run` to return? | Sprint 3, "The gotchas we fixed" |
 | How does backpressure stop the whole upstream? | Sprint 3, "Backpressure, end to end" |
+| How does a worker find work when its own queue is empty? | Sprint 4, "The work-stealing pool" |
+| Why store each column as its own contiguous array? | Sprint 4, "The columnar data model" |

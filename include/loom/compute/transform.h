@@ -3,29 +3,40 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 
-#ifdef LOOM_HAS_ARROW
-#include <arrow/record_batch.h>
-#endif
+#include "loom/compute/column.h"
 
 namespace loom {
 namespace compute {
 
-using TransformFunc = std::function<void(void* input_batch, void* output_batch)>;
+class ThreadPool;
+
+// A batch transform: input RecordBatch -> output RecordBatch.
+// Row-preserving functions (same row count in and out) can be run in parallel
+// via apply_parallel, which chunks the rows across the thread pool.
+using TransformFunc = std::function<RecordBatch(const RecordBatch&)>;
 
 class Transform {
 public:
     Transform();
     ~Transform();
 
-    void register_python_function(const std::string& name, const std::string& module, const std::string& func);
-    void register_native_function(const std::string& name, TransformFunc func);
+    Transform(const Transform&) = delete;
+    Transform& operator=(const Transform&) = delete;
+    Transform(Transform&&) noexcept;
+    Transform& operator=(Transform&&) noexcept;
 
-#ifdef LOOM_HAS_ARROW
-    std::shared_ptr<arrow::RecordBatch> apply(
-        const std::string& func_name,
-        const std::shared_ptr<arrow::RecordBatch>& batch);
-#endif
+    void register_function(const std::string& name, TransformFunc func);
+    bool has_function(const std::string& name) const;
+
+    // Apply a registered function to the whole batch (single-threaded).
+    RecordBatch apply(const std::string& name, const RecordBatch& batch) const;
+
+    // Apply a registered row-preserving function to row chunks in parallel,
+    // then concatenate. Throws if the function changes the row count.
+    RecordBatch apply_parallel(const std::string& name, const RecordBatch& batch,
+                               ThreadPool& pool) const;
 
 private:
     class Impl;

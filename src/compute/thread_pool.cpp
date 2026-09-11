@@ -1,38 +1,86 @@
 #include "loom/compute/thread_pool.h"
-#include <vector>
-#include <thread>
-#include <queue>
-#include <mutex>
+
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <functional>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 namespace loom {
 namespace compute {
 
+// Work-stealing pool: each worker owns a double-ended queue.  A worker runs
+// its own tasks last-in-first-out (LIFO, better cache locality for nested
+// submits), and when idle steals from the *front* of a victim's queue
+// (first-in-first-out).  LIFO-owner / FIFO-thief is the classic Chase-Lev
+// policy; here we use a mutex per worker instead of a lock-free deque.
 struct ThreadPool::Impl {
-    std::vector<std::thread> workers;
-    std::queue<std::function<void()>> tasks;
-    std::mutex mutex;
-    std::condition_variable cv;
-    bool stopped = false;
+    struct Worker {
+        int id = 0;
+        std::thread thread;
+        std::deque<std::function<void()>> queue;
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool stop = false;
+        int steal_cursor = 0;  // rotating start index for stealing
+    };
 
-    void worker_loop() {
+    std::vector<std::unique_ptr<Worker>> workers;
+    std::atomic<int> next_submit{0};
+    std::atomic<int> pending{0};
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+
+    // Pop the worker's own newest task (LIFO).
+    bool pop_own(Worker* w, std::function<void()>& out) {
+        std::lock_guard<std::mutex> lock(w->mutex);
+        if (w->queue.empty()) return false;
+        out = std::move(w->queue.back());
+        w->queue.pop_back();
+        return true;
+    }
+
+    // Steal the oldest task from another worker (FIFO). Rotates the start
+    // victim to spread contention.
+    bool steal(Worker* thief, std::function<void()>& out) {
+        const int n = static_cast<int>(workers.size());
+        for (int k = 0; k < n; ++k) {
+            int idx = (thief->steal_cursor + k) % n;
+            Worker* victim = workers[idx].get();
+            if (victim == thief) continue;
+            std::lock_guard<std::mutex> lock(victim->mutex);
+            if (victim->queue.empty()) continue;
+            out = std::move(victim->queue.front());
+            victim->queue.pop_front();
+            thief->steal_cursor = (idx + 1) % n;
+            return true;
+        }
+        return false;
+    }
+
+    void worker_loop(Worker* w) {
         while (true) {
             std::function<void()> task;
-            {
-                std::unique_lock<std::mutex> lock(mutex);                       // lock acquired
-                cv.wait(lock, [this] { return stopped || !tasks.empty(); });    // wait
-                if (stopped && tasks.empty()) return;                           // return if stopped and no tasks
-                task = std::move(tasks.front());                                // move task
-                tasks.pop();                                                    // pop task
-                // lock release
+            if (pop_own(w, task) || steal(w, task)) {
+                task();
+                if (pending.fetch_sub(1) == 1) {
+                    std::lock_guard<std::mutex> lock(done_mutex);
+                    done_cv.notify_all();
+                }
+                continue;
             }
-            task();
+            // Nothing to do: park briefly, then re-check (self-correcting even
+            // if a notify was missed).
+            std::unique_lock<std::mutex> lock(w->mutex);
+            if (w->stop) return;
+            w->cv.wait_for(lock, std::chrono::milliseconds(1));
         }
     }
 };
 
-// Constructor and destructor
 ThreadPool::ThreadPool(int num_threads) : impl_(std::make_unique<Impl>()) {
     if (num_threads <= 0) {
         num_threads = static_cast<int>(std::thread::hardware_concurrency());
@@ -40,7 +88,11 @@ ThreadPool::ThreadPool(int num_threads) : impl_(std::make_unique<Impl>()) {
     }
     impl_->workers.reserve(num_threads);
     for (int i = 0; i < num_threads; ++i) {
-        impl_->workers.emplace_back(&Impl::worker_loop, impl_.get());
+        auto w = std::make_unique<Impl::Worker>();
+        w->id = i;
+        w->steal_cursor = (i + 1) % num_threads;
+        w->thread = std::thread(&Impl::worker_loop, impl_.get(), w.get());
+        impl_->workers.push_back(std::move(w));
     }
 }
 
@@ -49,18 +101,20 @@ ThreadPool::~ThreadPool() {
 }
 
 void ThreadPool::submit(std::function<void()> task) {
+    int n = static_cast<int>(impl_->workers.size());
+    int idx = impl_->next_submit.fetch_add(1, std::memory_order_relaxed) % n;
+    Impl::Worker* w = impl_->workers[idx].get();
     {
-        std::lock_guard<std::mutex> lock(impl_->mutex);     // acquire lock
-        impl_->tasks.push(std::move(task));                 // push task
+        std::lock_guard<std::mutex> lock(w->mutex);
+        w->queue.push_back(std::move(task));
     }
-    impl_->cv.notify_one();     // notify one worker
+    impl_->pending.fetch_add(1, std::memory_order_relaxed);
+    w->cv.notify_one();
 }
 
 void ThreadPool::wait_all() {
-    // naive: spin until queue drains
-    while (pending_tasks() > 0) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    std::unique_lock<std::mutex> lock(impl_->done_mutex);
+    impl_->done_cv.wait(lock, [this] { return impl_->pending.load() == 0; });
 }
 
 int ThreadPool::worker_count() const {
@@ -68,18 +122,19 @@ int ThreadPool::worker_count() const {
 }
 
 int ThreadPool::pending_tasks() const {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    return static_cast<int>(impl_->tasks.size());
+    return impl_->pending.load();
 }
 
 void ThreadPool::shutdown() {
-    {
-        std::lock_guard<std::mutex> lock(impl_->mutex);
-        impl_->stopped = true;
-    }
-    impl_->cv.notify_all();
     for (auto& w : impl_->workers) {
-        if (w.joinable()) w.join();
+        {
+            std::lock_guard<std::mutex> lock(w->mutex);
+            w->stop = true;
+        }
+        w->cv.notify_all();
+    }
+    for (auto& w : impl_->workers) {
+        if (w->thread.joinable()) w->thread.join();
     }
     impl_->workers.clear();
 }

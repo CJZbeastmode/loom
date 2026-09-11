@@ -1,16 +1,15 @@
 #pragma once
 
-#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
 
-#ifdef LOOM_HAS_ARROW
-#include <arrow/record_batch.h>
-#endif
+#include "loom/compute/column.h"
 
 namespace loom {
 namespace compute {
+
+class ThreadPool;
 
 struct FilterCondition {
     std::string field;
@@ -18,17 +17,27 @@ struct FilterCondition {
     std::string value;
 };
 
+// Row filter over a columnar batch.  Conditions are combined with AND.
+// Evaluation is embarrassingly parallel: rows are split across the thread pool,
+// each worker fills a slice of a shared selection mask, then the kept rows are
+// materialized into a new batch (the columnar equivalent of Arrow's Take).
 class Filter {
 public:
     Filter();
     ~Filter();
 
+    Filter(const Filter&) = delete;
+    Filter& operator=(const Filter&) = delete;
+    Filter(Filter&&) noexcept;
+    Filter& operator=(Filter&&) noexcept;
+
     void set_conditions(const std::vector<FilterCondition>& conditions);
 
-#ifdef LOOM_HAS_ARROW
-    std::shared_ptr<arrow::RecordBatch> apply(
-        const std::shared_ptr<arrow::RecordBatch>& batch);
-#endif
+    // Single-threaded reference implementation.
+    RecordBatch apply(const RecordBatch& batch) const;
+
+    // Parallel: split rows across `pool`, then merge.
+    RecordBatch apply_parallel(const RecordBatch& batch, ThreadPool& pool) const;
 
 private:
     class Impl;
