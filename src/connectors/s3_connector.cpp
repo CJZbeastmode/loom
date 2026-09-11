@@ -1,5 +1,7 @@
 #include "loom/connectors/s3_connector.h"
 
+#include <stdexcept>
+
 namespace loom {
 namespace connectors {
 
@@ -13,18 +15,20 @@ S3Connector::S3Connector(const S3Config& config)
 }
 
 S3Connector::~S3Connector() = default;
+S3Connector::S3Connector(S3Connector&&) noexcept = default;
+S3Connector& S3Connector::operator=(S3Connector&&) noexcept = default;
 
-std::string S3Connector::read_json(const std::string& /*path*/) {
-    return "{}";
+void S3Connector::write(const std::string& /*path*/, const std::string& /*data*/) {
+    throw std::runtime_error("S3Connector::write not implemented (requires S3/MinIO transport)");
 }
 
-void S3Connector::write_json_gz(const std::string& /*path*/, const std::string& /*data*/) {}
+std::string S3Connector::read(const std::string& /*path*/) {
+    throw std::runtime_error("S3Connector::read not implemented (requires S3/MinIO transport)");
+}
 
-bool S3Connector::file_exists(const std::string& /*path*/) {
+bool S3Connector::exists(const std::string& /*path*/) const {
     return false;
 }
-
-void S3Connector::delete_file(const std::string& /*path*/) {}
 
 }  // namespace connectors
 }  // namespace loom

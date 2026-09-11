@@ -47,7 +47,9 @@ set(LOOM_SOURCES
     src/compute/join.cpp
     src/compute/unnest.cpp
     src/compute/thread_pool.cpp
+    src/compute/sink.cpp
     src/connectors/s3_connector.cpp
+    src/connectors/file_connector.cpp
     src/connectors/connector_registry.cpp
 )
 

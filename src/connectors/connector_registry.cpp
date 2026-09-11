@@ -1,19 +1,24 @@
 #include "loom/connectors/connector_registry.h"
 
+#include <stdexcept>
+
 namespace loom {
 namespace connectors {
 
-struct ConnectorRegistry::Impl {};
-
-ConnectorRegistry::ConnectorRegistry() : impl_(std::make_unique<Impl>()) {}
-ConnectorRegistry::~ConnectorRegistry() = default;
-
-S3Connector* ConnectorRegistry::get_s3(const std::string& /*name*/, const S3Config& /*config*/) {
-    return nullptr;
+void ConnectorRegistry::add(const std::string& name, std::unique_ptr<Connector> connector) {
+    connectors_[name] = std::move(connector);
 }
 
-bool ConnectorRegistry::has(const std::string& /*name*/) const {
-    return false;
+Connector* ConnectorRegistry::get(const std::string& name) const {
+    auto it = connectors_.find(name);
+    if (it == connectors_.end()) {
+        throw std::runtime_error("unknown connector: " + name);
+    }
+    return it->second.get();
+}
+
+bool ConnectorRegistry::has(const std::string& name) const {
+    return connectors_.count(name) != 0;
 }
 
 }  // namespace connectors

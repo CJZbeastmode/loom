@@ -86,17 +86,33 @@ function per batch (e.g. "extract fields from raw Jira JSON" → a clean
 **`src/compute/filter.cpp`** — the *gate* operator. Drops rows not matching
 conditions (`status == "Resolved"`), in parallel across the pool.
 
-**`src/compute/aggregate.cpp` / `join.cpp` / `unnest.cpp`** — the *summarize /
-combine / explode* operators (Sprint 5+, stubs). Aggregate produces "avg cycle
-time per assignee".
+**`src/compute/aggregate.cpp`** — the *summarize* operator. Group-by with
+running accumulators (`count/sum/avg/min/max/percentile`); `accumulate()` ingests
+each micro-batch, `finalize()` emits one row per group (e.g. "avg cycle time per
+assignee").
+
+**`src/compute/join.cpp` / `unnest.cpp`** — the *combine / explode* operators
+(later sprints — stubs).
 
 ---
 
 ## Phase 5 — Write results out
 
-**`src/connectors/s3_connector.cpp` + `connector_registry.cpp`** — the *shipping
-dock*. Turns a connection name (`"s3_landing"`) into an actual writer, and
-writes the final batch to Parquet/S3. (Sprint 5 — stubs.)
+**`src/compute/sink.cpp`** — the *packager*. Serializes the final batch to the
+requested format (CSV/JSON) and materializes the path template
+(`outputs/cycle_time/{date}.csv` → today's date). Doesn't care *where* the bytes
+land — that's the connector's job.
+
+**`src/connectors/file_connector.cpp`** — the *local disk* connector (working).
+Writes/reads files under a root directory. Used for real output and for tests.
+
+**`src/connectors/s3_connector.cpp`** — the *S3/MinIO* connector (stub). Carries
+`S3Config` and implements the `Connector` interface, but throws until the S3
+transport (SigV4 signing + endpoint) is wired.
+
+**`src/connectors/connector_registry.cpp`** — the *address book*. Maps a
+connection name (`"s3_landing"`) to a `Connector` instance so the sink can
+resolve it.
 
 ---
 
@@ -128,5 +144,8 @@ written, the phases exist but aren't chained.
 | `compute/thread_pool.cpp` | parallel workers |
 | `compute/transform.cpp` | reshape rows |
 | `compute/filter.cpp` | drop rows |
-| `compute/aggregate.cpp` | summarize (stub) |
-| `connectors/s3_connector.cpp` | write output (stub) |
+| `compute/aggregate.cpp` | group-by summary |
+| `compute/sink.cpp` | serialize + write output |
+| `connectors/file_connector.cpp` | local disk connector (working) |
+| `connectors/s3_connector.cpp` | S3/MinIO connector (stub) |
+| `connectors/connector_registry.cpp` | name → connector lookup |

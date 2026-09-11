@@ -61,6 +61,7 @@ moment it arrives — request #100 may still be in flight.
 | 2 | [Sprint 2 — Durable Request Queue & Rate Limiter](sprint2-queue-rate-limiter.md) | SQLite-backed persistent queue (crash-resume) + lock-free token bucket | Implemented |
 | 3 | [Sprint 3 — Async HTTP Client & Source Scheduler](sprint3-http-scheduler.md) | libuv async HTTP client, streaming source scheduler, bounded backpressure queue | Implemented |
 | 4 | [Sprint 4 — Work-Stealing Thread Pool & Parallel Compute](sprint4-compute.md) | work-stealing pool + columnar transform/filter, benchmarked parallel speedup | Implemented |
+| 5 | [Sprint 5 — Aggregate, Sink & Connectors](sprint5-aggregate-sink.md) | streaming group-by, CSV/JSON sink, connector interface + registry | Implemented |
 
 ---
 
@@ -93,6 +94,8 @@ Test suites and expected counts:
 | `test_thread_pool` | work-stealing pool: correctness, speedup, nested submit | 5 |
 | `test_filter` | columnar filter: all ops, AND, nulls, parallel, benchmark | 11 |
 | `test_transform` | registry, apply, parallel apply, row-count guard | 4 |
+| `test_aggregate` | group-by: count/sum/avg/min/max/percentile, incremental, nulls | 10 |
+| `test_sink` | CSV/JSON serialization, path materialization, connector round-trip | 10 |
 
 > **Note on the test framework:** tests use a tiny self-contained harness
 > (`tests/test_utils.h`), not Google Test. This was a deliberate choice so the
@@ -114,3 +117,5 @@ Test suites and expected counts:
 | How does backpressure stop the whole upstream? | Sprint 3, "Backpressure, end to end" |
 | How does a worker find work when its own queue is empty? | Sprint 4, "The work-stealing pool" |
 | Why store each column as its own contiguous array? | Sprint 4, "The columnar data model" |
+| How is `avg` computed without storing every row? | Sprint 5, "Group-by = hash map + accumulators" |
+| How does the sink not care if output is disk or S3? | Sprint 5, "Connectors" |

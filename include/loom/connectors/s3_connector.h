@@ -1,13 +1,9 @@
 #pragma once
 
-#include <string>
 #include <memory>
-#include <vector>
-#include <functional>
+#include <string>
 
-#ifdef LOOM_HAS_ARROW
-#include <arrow/record_batch.h>
-#endif
+#include "loom/connectors/connector.h"
 
 namespace loom {
 namespace connectors {
@@ -20,21 +16,25 @@ struct S3Config {
     std::string prefix;
 };
 
-class S3Connector {
+// S3-compatible object-storage connector (AWS S3 / MinIO).
+//
+// NOTE: the actual network write requires S3 request signing (SigV4) and an
+// endpoint, neither of which is available in this environment yet.  This class
+// carries the config and implements the Connector interface, but write/read
+// throw until the transport is wired (a later sprint).
+class S3Connector : public Connector {
 public:
     explicit S3Connector(const S3Config& config);
-    ~S3Connector();
+    ~S3Connector() override;
 
-    std::string read_json(const std::string& path);
+    S3Connector(const S3Connector&) = delete;
+    S3Connector& operator=(const S3Connector&) = delete;
+    S3Connector(S3Connector&&) noexcept;
+    S3Connector& operator=(S3Connector&&) noexcept;
 
-#ifdef LOOM_HAS_ARROW
-    void write_parquet(const std::string& path,
-                       const std::shared_ptr<arrow::RecordBatch>& batch);
-#endif
-
-    void write_json_gz(const std::string& path, const std::string& data);
-    bool file_exists(const std::string& path);
-    void delete_file(const std::string& path);
+    void write(const std::string& path, const std::string& data) override;
+    std::string read(const std::string& path) override;
+    bool exists(const std::string& path) const override;
 
 private:
     class Impl;
