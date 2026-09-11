@@ -37,8 +37,8 @@ set(LOOM_SOURCES
     src/dag/validator.cpp
     src/dag/executor.cpp
     src/dag/join_state.cpp
+    src/dag/source_scheduler.cpp
     src/queue/request_queue.cpp
-    src/queue/stream_queue.cpp
     src/queue/rate_limiter.cpp
     src/http/client.cpp
     src/compute/transform.cpp

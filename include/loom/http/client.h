@@ -45,11 +45,14 @@ public:
     void submit(const HttpRequest& request, ResponseCallback callback);
     void cancel_all();
     int inflight_count() const;
+    int max_inflight() const;
     void run_event_loop();
     void stop_event_loop();
 
-private:
+    // Forward-declared (public so the .cpp's free callbacks can reference it).
     class Impl;
+
+private:
     std::unique_ptr<Impl> impl_;
 };
 

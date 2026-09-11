@@ -111,8 +111,11 @@ struct RequestQueue::Impl {
     sqlite3_stmt* stmt_count = nullptr;
 #endif
 
+    // Serializes all queue operations. The SQLite connection and prepared
+    // statements are shared across threads (scheduler worker + HTTP loop).
+    mutable std::mutex mutex;
+
     // In-memory fallback (used when compiled without SQLite).
-    std::mutex mutex;
     std::vector<RequestRecord> records;
 };
 
@@ -182,6 +185,7 @@ RequestQueue::~RequestQueue() {
 }
 
 void RequestQueue::enqueue(const std::vector<RequestRecord>& records) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
 #ifdef LOOM_HAS_SQLITE
     exec(impl_->db, "BEGIN;");
     for (const auto& r : records) {
@@ -207,7 +211,6 @@ void RequestQueue::enqueue(const std::vector<RequestRecord>& records) {
     }
     exec(impl_->db, "COMMIT;");
 #else
-    std::lock_guard<std::mutex> lock(impl_->mutex);
     for (const auto& r : records) {
         RequestRecord rec = r;
         if (rec.request_id.empty()) rec.request_id = make_request_id();
@@ -220,6 +223,7 @@ void RequestQueue::enqueue(const std::vector<RequestRecord>& records) {
 }
 
 std::optional<RequestRecord> RequestQueue::dequeue() {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
 #ifdef LOOM_HAS_SQLITE
     exec(impl_->db, "BEGIN IMMEDIATE;");
 
@@ -267,7 +271,6 @@ std::optional<RequestRecord> RequestQueue::dequeue() {
     exec(impl_->db, "COMMIT;");
     return result;
 #else
-    std::lock_guard<std::mutex> lock(impl_->mutex);
     for (auto& r : impl_->records) {
         if (r.status == RequestStatus::Pending) {
             r.status = RequestStatus::Inflight;
@@ -280,6 +283,7 @@ std::optional<RequestRecord> RequestQueue::dequeue() {
 }
 
 void RequestQueue::mark_inflight(const std::string& request_id) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
 #ifdef LOOM_HAS_SQLITE
     sqlite3_stmt* t = impl_->stmt_transition;
     sqlite3_reset(t);
@@ -293,7 +297,6 @@ void RequestQueue::mark_inflight(const std::string& request_id) {
     sqlite3_bind_text(t, 8, impl_->dag_run_id.c_str(), -1, SQLITE_TRANSIENT);
     check_rc(sqlite3_step(t), impl_->db, "mark_inflight");
 #else
-    std::lock_guard<std::mutex> lock(impl_->mutex);
     for (auto& r : impl_->records) {
         if (r.request_id == request_id) { r.status = RequestStatus::Inflight; r.started_at = now_iso(); return; }
     }
@@ -302,6 +305,7 @@ void RequestQueue::mark_inflight(const std::string& request_id) {
 
 void RequestQueue::mark_done(const std::string& request_id, int response_status,
                              const std::string& response_body) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
 #ifdef LOOM_HAS_SQLITE
     sqlite3_stmt* t = impl_->stmt_transition;
     sqlite3_reset(t);
@@ -315,7 +319,6 @@ void RequestQueue::mark_done(const std::string& request_id, int response_status,
     sqlite3_bind_text(t, 8, impl_->dag_run_id.c_str(), -1, SQLITE_TRANSIENT);
     check_rc(sqlite3_step(t), impl_->db, "mark_done");
 #else
-    std::lock_guard<std::mutex> lock(impl_->mutex);
     for (auto& r : impl_->records) {
         if (r.request_id == request_id) {
             r.status = RequestStatus::Done;
@@ -329,6 +332,7 @@ void RequestQueue::mark_done(const std::string& request_id, int response_status,
 }
 
 void RequestQueue::mark_failed(const std::string& request_id, const std::string& error) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
 #ifdef LOOM_HAS_SQLITE
     sqlite3_stmt* t = impl_->stmt_transition;
     sqlite3_reset(t);
@@ -342,7 +346,6 @@ void RequestQueue::mark_failed(const std::string& request_id, const std::string&
     sqlite3_bind_text(t, 8, impl_->dag_run_id.c_str(), -1, SQLITE_TRANSIENT);
     check_rc(sqlite3_step(t), impl_->db, "mark_failed");
 #else
-    std::lock_guard<std::mutex> lock(impl_->mutex);
     for (auto& r : impl_->records) {
         if (r.request_id == request_id) {
             r.status = RequestStatus::Failed;
@@ -355,6 +358,7 @@ void RequestQueue::mark_failed(const std::string& request_id, const std::string&
 }
 
 void RequestQueue::mark_skipped(const std::string& request_id) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
 #ifdef LOOM_HAS_SQLITE
     sqlite3_stmt* t = impl_->stmt_transition;
     sqlite3_reset(t);
@@ -368,7 +372,6 @@ void RequestQueue::mark_skipped(const std::string& request_id) {
     sqlite3_bind_text(t, 8, impl_->dag_run_id.c_str(), -1, SQLITE_TRANSIENT);
     check_rc(sqlite3_step(t), impl_->db, "mark_skipped");
 #else
-    std::lock_guard<std::mutex> lock(impl_->mutex);
     for (auto& r : impl_->records) {
         if (r.request_id == request_id) { r.status = RequestStatus::Skipped; r.completed_at = now_iso(); return; }
     }
@@ -380,6 +383,7 @@ bool RequestQueue::is_exhausted() const {
 }
 
 int RequestQueue::pending_count() const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
 #ifdef LOOM_HAS_SQLITE
     sqlite3_stmt* s = impl_->stmt_count;
     sqlite3_reset(s);
@@ -392,13 +396,13 @@ int RequestQueue::pending_count() const {
     sqlite3_reset(s);
     return pending;
 #else
-    std::lock_guard<std::mutex> lock(impl_->mutex);
     return static_cast<int>(std::count_if(impl_->records.begin(), impl_->records.end(),
         [](const RequestRecord& r) { return r.status == RequestStatus::Pending; }));
 #endif
 }
 
 int RequestQueue::inflight_count() const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
 #ifdef LOOM_HAS_SQLITE
     sqlite3_stmt* s = impl_->stmt_count;
     sqlite3_reset(s);
@@ -411,13 +415,13 @@ int RequestQueue::inflight_count() const {
     sqlite3_reset(s);
     return inflight;
 #else
-    std::lock_guard<std::mutex> lock(impl_->mutex);
     return static_cast<int>(std::count_if(impl_->records.begin(), impl_->records.end(),
         [](const RequestRecord& r) { return r.status == RequestStatus::Inflight; }));
 #endif
 }
 
 int RequestQueue::done_count() const {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
 #ifdef LOOM_HAS_SQLITE
     sqlite3_stmt* s = impl_->stmt_count;
     sqlite3_reset(s);
@@ -430,13 +434,13 @@ int RequestQueue::done_count() const {
     sqlite3_reset(s);
     return done;
 #else
-    std::lock_guard<std::mutex> lock(impl_->mutex);
     return static_cast<int>(std::count_if(impl_->records.begin(), impl_->records.end(),
         [](const RequestRecord& r) { return r.status == RequestStatus::Done; }));
 #endif
 }
 
 void RequestQueue::set_flush_policy(const FlushPolicy& policy) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->flush_policy = policy;
 }
 
@@ -445,6 +449,7 @@ void RequestQueue::flush_completed() {
 }
 
 void RequestQueue::resume() {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
     // Reset any rows stuck in 'inflight' (e.g. after a crash) back to 'pending'.
 #ifdef LOOM_HAS_SQLITE
     sqlite3_stmt* stmt = nullptr;
@@ -455,7 +460,6 @@ void RequestQueue::resume() {
     check_rc(sqlite3_step(stmt), impl_->db, "resume");
     sqlite3_finalize(stmt);
 #else
-    std::lock_guard<std::mutex> lock(impl_->mutex);
     for (auto& r : impl_->records) {
         if (r.status == RequestStatus::Inflight) {
             r.status = RequestStatus::Pending;
